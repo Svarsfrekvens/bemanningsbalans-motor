@@ -1,0 +1,176 @@
+"""CP-SAT solver. Hard rules are constraints, never penalty terms.
+
+Optimality is relative to supplied shift templates and the configured start grid.
+The objective is integer cents for paid time + 50 SEK per customer/employee
+relationship + 2.50 SEK per permille of workload-utilisation spread.
+"""
+from math import floor
+from uuid import uuid4
+from .domain import (check_input, occurrences, span, paid, overlap, intersect,
+                     instant, add_days, days, night_intervals, is_night, monday)
+from .validate import validate
+
+
+def solve(data, seconds=30):
+    from ortools.sat.python import cp_model
+    check_input(data)
+    seconds = min(300, max(1, float(seconds)))
+    wp, rules = data['workplace'], data['rules']
+    lo,hi = instant(wp['start'],'00:00'),instant(add_days(wp['end'],1),'00:00')
+    period_days=list(days(wp['start'],wp['end']))
+    employees=[e for e in data['employees'] if e['status']=='active']
+    templates={t['id']:t for t in data['templates']}
+    occ=occurrences(data)
+    model=cp_model.CpModel()
+    candidates=[]
+    boundaries=[]
+    for s in data['boundaryShifts']:
+        a,b=span(s)
+        boundaries.append(dict(shift=s,a=a,b=b,work=paid(s),x=1))
+    for e in employees:
+        boundary=[b for b in boundaries if b['shift']['employeeId']==e['id']]
+        absences=[(instant(a['start'],'00:00'),instant(add_days(a['end'],1),'00:00')) for a in data['absences'] if a['employeeId']==e['id']]
+        for day in days(add_days(wp['start'],-1),wp['end']):
+            for profile in e['profiles']:
+                t=templates[profile]
+                s=dict(id=f"{e['id']}:{day}:{profile}",employeeId=e['id'],date=day,start=t['start'],end=t['end'],type=t['type'],skills=t['skills'],breaks=t['breaks'])
+                a,b=span(s)
+                if b<=lo or a>=hi or b-a>rules['maxShiftHours']*60: continue
+                if not set(t['skills'])<=set(e['skills']) or (is_night(a,b) and not e['night']): continue
+                if any(overlap(a,b,x,y) for x,y in absences): continue
+                if any(not (a-v['b']>=rules['minRestHours']*60 or v['a']-b>=rules['minRestHours']*60) for v in boundary): continue
+                work=paid(s)
+                x=model.new_bool_var('shift:'+s['id'])
+                candidates.append(dict(shift=s,a=a,b=b,work=work,x=x))
+    if len(candidates)>10000:
+        raise ValueError('För många passalternativ. Begränsa personal, passmallar eller period.')
+
+    def min_period(c):
+        return sum(intersect(a,b,lo,hi) for a,b in c['work'])
+
+    utilisations=[]
+    for e in employees:
+        rows=sorted((c for c in candidates if c['shift']['employeeId']==e['id']),key=lambda c:c['a'])
+        fixed=[b for b in boundaries if b['shift']['employeeId']==e['id']]
+        for i,a in enumerate(rows):
+            for b in rows[i+1:]:
+                if b['a']-a['b']>=rules['minRestHours']*60: break
+                model.add(a['x']+b['x']<=1)
+        cap=floor(e['ssg']/100*rules['fullTimeWeeklyHours']*60*len(period_days)/7+1e-7)
+        used=sum(min_period(c)*c['x'] for c in rows)+sum(min_period(c) for c in fixed)
+        model.add(used<=cap)
+        if cap>0:
+            util=model.new_int_var(0,1000,'util:'+e['id'])
+            used_var=model.new_int_var(0,cap,'paid_minutes:'+e['id'])
+            model.add(used_var==used)
+            model.add_division_equality(util,used_var*1000,cap)
+            utilisations.append(util)
+        for week in {monday(day) for day in period_days}:
+            wa,wb=instant(week,'00:00'),instant(add_days(week,7),'00:00')
+            model.add(sum(sum(intersect(a,b,wa,wb) for a,b in c['work'])*c['x'] for c in rows+fixed)<=floor(rules['maxWeeklyHours']*60))
+        flags=[]
+        for day in days(add_days(wp['start'],-rules['maxConsecutiveDays']),add_days(wp['end'],rules['maxConsecutiveDays'])):
+            a,b=instant(day,'00:00'),instant(add_days(day,1),'00:00')
+            flag=model.new_bool_var('workday:'+e['id']+day)
+            covering=[c['x'] for c in rows+fixed if overlap(c['a'],c['b'],a,b)]
+            if covering: model.add_max_equality(flag,covering)
+            else: model.add(flag==0)
+            flags.append(flag)
+        window=rules['maxConsecutiveDays']+1
+        for i in range(len(flags)-window+1):
+            model.add(sum(flags[i:i+window])<=rules['maxConsecutiveDays'])
+
+    # Awake-night floor counts on-duty, eligible people. Rest constraints prevent
+    # a person from being counted through two simultaneous candidate shifts.
+    for a,b in night_intervals(wp['start'],wp['end']):
+        a,b=max(a,lo),min(b,hi)
+        if a>=b or not rules['nightFloor']: continue
+        valid_ids={e['id'] for e in employees if e['night']}
+        coverage=[(u,v,c['x']) for c in candidates+boundaries if c['shift']['employeeId'] in valid_ids for u,v in c['work']]
+        edges=sorted({a,b}|{t for u,v,_ in coverage for t in (u,v) if a<t<b})
+        for edge in edges[:-1]:
+            model.add(sum(x for u,v,x in coverage if u<=edge<v)>=rules['nightFloor'])
+
+    task_vars=[]
+    per_employee={e['id']:[] for e in employees}
+    customer_links={}
+    supports_count=0
+    gaps=[]
+    for o in occ:
+        # Start times are real integer minutes. Duration is never rounded.
+        starts=list(range(o['earliest']-lo,o['latest']-lo+1,rules['flexibilityStep']))
+        start=model.new_int_var_from_domain(cp_model.Domain.from_values(starts),'start:'+o['id'])
+        duration=o['task']['minutes']
+        end=model.new_int_var(starts[0]+duration,starts[-1]+duration,'end:'+o['id'])
+        model.add(end==start+duration)
+        assigns=[]
+        for e in employees:
+            if not set(o['task']['skills'])<=set(e['skills']): continue
+            candidates_for_e=[c for c in candidates+boundaries if c['shift']['employeeId']==e['id']]
+            options=[]
+            for c in candidates_for_e:
+                for a,b in c['work']:
+                    if b-a<duration or b<o['earliest']+duration or a>o['latest']: continue
+                    z=model.new_bool_var('support:'+str(supports_count));supports_count+=1
+                    if supports_count>120000:
+                        raise ValueError('För många möjliga insatstilldelningar. Förkorta perioden.')
+                    model.add(z<=c['x'])
+                    model.add(start>=a-lo).only_enforce_if(z)
+                    model.add(end<=b-lo).only_enforce_if(z)
+                    options.append(z)
+            if not options: continue
+            selected=model.new_bool_var('assign:'+o['id']+':'+e['id'])
+            model.add(sum(options)==selected)
+            interval=model.new_optional_interval_var(start,duration,end,selected,'task:'+o['id']+':'+e['id'])
+            per_employee[e['id']].append(interval)
+            assigns.append((e['id'],selected))
+            customer_links.setdefault((o['task']['customerId'],e['id']),[]).append(selected)
+        # Coverage is a strongly weighted goal, never a silent relaxation of the
+        # hard rules: an unstaffed intervention is reported back explicitly.
+        gap=model.new_int_var(0,o['count'],'uncovered:'+o['id'])
+        model.add(sum(x for _,x in assigns)+gap==o['count'])
+        gaps.append((o,gap))
+        task_vars.append((o,start,end,assigns))
+    for intervals in per_employee.values():
+        model.add_no_overlap(intervals)
+
+    wages={e['id']:e['hourlyCost'] if e['hourlyCost'] is not None else data['economy']['hourlyCost'] for e in employees}
+    cost=sum(round(min_period(c)/60*wages[c['shift']['employeeId']]*100)*c['x'] for c in candidates)
+    links=[]
+    for (customer,employee),xs in customer_links.items():
+        used=model.new_bool_var('continuity:'+customer+':'+employee)
+        model.add_max_equality(used,xs); links.append(used)
+    spread=0
+    if utilisations:
+        mx=model.new_int_var(0,1000,'max_util');mn=model.new_int_var(0,1000,'min_util')
+        model.add_max_equality(mx,utilisations);model.add_min_equality(mn,utilisations)
+        spread=mx-mn
+    # 50 000 öre (500 kr) per obemannad insatsminut. Det är tusenfalt dyrare än
+    # att lägga ett pass, så täckning går alltid före kostnad, kontinuitet och
+    # jämn belastning. Hårda villkor lättas aldrig – obemannat behov redovisas.
+    uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
+    model.minimize(cost+5000*sum(links)+250*spread+50000*uncovered_minutes)
+    solver=cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds=seconds
+    solver.parameters.num_search_workers=8
+    solver.parameters.random_seed=41
+    status=solver.solve(model)
+    code=solver.status_name(status)
+    explanations={
+        'OPTIMAL':'Bevisat optimal inom valda passmallar, tidssteg och viktade mål. Granska förslaget innan du godkänner.',
+        'FEASIBLE':'En giltig lösning hittades. Bästa möjliga lösning är inte bevisad inom tidsgränsen.',
+        'INFEASIBLE':'Ingen lösning uppfyller alla hårda villkor inom valda passmallar och tidssteg. Kontrollera behov, kompetens, tillgänglighet och passmallar. Inga regler har lättats.',
+        'UNKNOWN':'Sökningen avbröts vid tidsgränsen utan en hittad lösning. Detta bevisar inte att problemet är olösbart.',
+        'MODEL_INVALID':'Optimeringsmodellen är ogiltig. Inget schemaförslag kan användas.'}
+    schedule=dict(id=str(uuid4()),status='draft',basedOnRevision=data['inputRevision'],shifts=[],assignments=[],uncovered=[],solverStatus=code,explanation=explanations.get(code,'Okänd beräkningsstatus.'),seconds=solver.wall_time,objective=None,bound=None)
+    if status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
+        schedule['shifts']=[c['shift'] for c in candidates if solver.value(c['x'])]
+        schedule['assignments']=[dict(occurrenceId=o['id'],employeeId=e,start=solver.value(start)+lo,end=solver.value(end)+lo) for o,start,end,assigns in task_vars for e,x in assigns if solver.value(x)]
+        schedule['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=solver.value(gap)) for o,gap in gaps if solver.value(gap)]
+        schedule['objective']=solver.objective_value
+        schedule['bound']=solver.best_objective_bound
+        result=validate(data,schedule)
+        if not result['valid']:
+            schedule.update(solverStatus='MODEL_INVALID',shifts=[],assignments=[],explanation='Förslaget stoppades av den fristående kontrollen: '+result['errors'][0]['message'])
+        return dict(schedule=schedule,validation=result,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
+    return dict(schedule=schedule,validation=None,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
