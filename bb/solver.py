@@ -14,7 +14,7 @@ from .validate import validate
 def solve(data, seconds=30):
     from ortools.sat.python import cp_model
     check_input(data)
-    seconds = min(60, max(1, float(seconds)))
+    seconds = min(300, max(1, float(seconds)))
     wp, rules = data['workplace'], data['rules']
     lo,hi = instant(wp['start'],'00:00'),instant(add_days(wp['end'],1),'00:00')
     period_days=list(days(wp['start'],wp['end']))
