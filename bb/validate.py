@@ -67,14 +67,28 @@ def validate(data, schedule):
                     issue('CONSECUTIVE',f"{e['code']}: för många kalenderdagar med arbete i följd.",employeeId=e['id'])
         assignments=schedule['assignments']
         known={o['id'] for o in occ}
+        # Ett förslag får redovisa obemannat behov, men bara om det är öppet
+        # deklarerat. Odeklarerad brist är fortfarande ett fel.
+        declared={}
+        for u in schedule.get('uncovered') or []:
+            try:
+                declared[u['occurrenceId']]=int(u['count'])
+            except (KeyError,TypeError,ValueError):
+                issue('UNCOVERED','Obemannat behov är felaktigt redovisat.')
         for a in assignments:
             if a['occurrenceId'] not in known:
                 issue('UNKNOWN_TASK','Okänd insats i tilldelningen.',occurrenceId=a['occurrenceId'])
         for o in occ:
             rows=[a for a in assignments if a['occurrenceId']==o['id']]
             meta=dict(occurrenceId=o['id'])
-            if len(rows)!=o['count'] or len({a['employeeId'] for a in rows})!=o['count']:
+            distinct=len({a['employeeId'] for a in rows})
+            gap=declared.get(o['id'],0)
+            if len(rows)!=distinct:
+                issue('COVERAGE',f"{o['task']['name']} {o['date']}: samma medarbetare räknas flera gånger.",**meta)
+            elif distinct+gap!=o['count']:
                 issue('COVERAGE',f"{o['task']['name']} {o['date']}: kräver {o['count']} olika medarbetare.",**meta)
+            elif gap:
+                warnings.append(dict(rule='UNCOVERED',message=f"{o['task']['name']} {o['date']}: {gap} av {o['count']} insatstillfällen är obemannade i förslaget.",occurrenceId=o['id']))
             if len({a['start'] for a in rows})>1:
                 issue('SIMULTANEOUS','Dubbelbemanningen startar inte samtidigt.',**meta)
             for a in rows:

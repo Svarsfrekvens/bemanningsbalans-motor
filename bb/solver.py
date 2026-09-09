@@ -92,9 +92,17 @@ def solve(data, seconds=30):
             model.add(sum(x for u,v,x in coverage if u<=edge<v)>=rules['nightFloor'])
 
     task_vars=[]
+    # Ge CP-SAT en omedelbart giltig startpunkt: inga valda pass och allt
+    # kundbehov öppet redovisat som obemannat. Utan denna startpunkt kunde den
+    # stora Galaxen-modellen använda hela tidsgränsen i presolve/sökning och
+    # svara UNKNOWN trots att den mjuka täckningsmodellen alltid har en lösning.
+    # Motorn förbättrar därefter startpunkten genom att välja pass och bemanna.
+    shift_hints=[]
+    support_hints=[]
     per_employee={e['id']:[] for e in employees}
     customer_links={}
     supports_count=0
+    gaps=[]
     for o in occ:
         # Start times are real integer minutes. Duration is never rounded.
         starts=list(range(o['earliest']-lo,o['latest']-lo+1,rules['flexibilityStep']))
@@ -111,6 +119,7 @@ def solve(data, seconds=30):
                 for a,b in c['work']:
                     if b-a<duration or b<o['earliest']+duration or a>o['latest']: continue
                     z=model.new_bool_var('support:'+str(supports_count));supports_count+=1
+                    support_hints.append(z)
                     if supports_count>120000:
                         raise ValueError('För många möjliga insatstilldelningar. Förkorta perioden.')
                     model.add(z<=c['x'])
@@ -119,12 +128,17 @@ def solve(data, seconds=30):
                     options.append(z)
             if not options: continue
             selected=model.new_bool_var('assign:'+o['id']+':'+e['id'])
+            support_hints.append(selected)
             model.add(sum(options)==selected)
             interval=model.new_optional_interval_var(start,duration,end,selected,'task:'+o['id']+':'+e['id'])
             per_employee[e['id']].append(interval)
             assigns.append((e['id'],selected))
             customer_links.setdefault((o['task']['customerId'],e['id']),[]).append(selected)
-        model.add(sum(x for _,x in assigns)==o['count'])
+        # Coverage is a strongly weighted goal, never a silent relaxation of the
+        # hard rules: an unstaffed intervention is reported back explicitly.
+        gap=model.new_int_var(0,o['count'],'uncovered:'+o['id'])
+        model.add(sum(x for _,x in assigns)+gap==o['count'])
+        gaps.append((o,gap))
         task_vars.append((o,start,end,assigns))
     for intervals in per_employee.values():
         model.add_no_overlap(intervals)
@@ -140,10 +154,24 @@ def solve(data, seconds=30):
         mx=model.new_int_var(0,1000,'max_util');mn=model.new_int_var(0,1000,'min_util')
         model.add_max_equality(mx,utilisations);model.add_min_equality(mn,utilisations)
         spread=mx-mn
-    model.minimize(cost+5000*sum(links)+250*spread)
+    # 50 000 öre (500 kr) per obemannad insatsminut. Det är tusenfalt dyrare än
+    # att lägga ett pass, så täckning går alltid före kostnad, kontinuitet och
+    # jämn belastning. Hårda villkor lättas aldrig – obemannat behov redovisas.
+    uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
+    model.minimize(cost+5000*sum(links)+250*spread+50000*uncovered_minutes)
+    for c in candidates:
+        model.add_hint(c['x'],0)
+    for x in support_hints:
+        model.add_hint(x,0)
+    for o,start,end,_ in task_vars:
+        first=o['earliest']-lo
+        model.add_hint(start,first)
+        model.add_hint(end,first+o['task']['minutes'])
+    for o,gap in gaps:
+        model.add_hint(gap,o['count'])
     solver=cp_model.CpSolver()
     solver.parameters.max_time_in_seconds=seconds
-    solver.parameters.num_search_workers=4
+    solver.parameters.num_search_workers=8
     solver.parameters.random_seed=41
     status=solver.solve(model)
     code=solver.status_name(status)
@@ -153,10 +181,11 @@ def solve(data, seconds=30):
         'INFEASIBLE':'Ingen lösning uppfyller alla hårda villkor inom valda passmallar och tidssteg. Kontrollera behov, kompetens, tillgänglighet och passmallar. Inga regler har lättats.',
         'UNKNOWN':'Sökningen avbröts vid tidsgränsen utan en hittad lösning. Detta bevisar inte att problemet är olösbart.',
         'MODEL_INVALID':'Optimeringsmodellen är ogiltig. Inget schemaförslag kan användas.'}
-    schedule=dict(id=str(uuid4()),status='draft',basedOnRevision=data['inputRevision'],shifts=[],assignments=[],solverStatus=code,explanation=explanations.get(code,'Okänd beräkningsstatus.'),seconds=solver.wall_time,objective=None,bound=None)
+    schedule=dict(id=str(uuid4()),status='draft',basedOnRevision=data['inputRevision'],shifts=[],assignments=[],uncovered=[],solverStatus=code,explanation=explanations.get(code,'Okänd beräkningsstatus.'),seconds=solver.wall_time,objective=None,bound=None)
     if status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
         schedule['shifts']=[c['shift'] for c in candidates if solver.value(c['x'])]
         schedule['assignments']=[dict(occurrenceId=o['id'],employeeId=e,start=solver.value(start)+lo,end=solver.value(end)+lo) for o,start,end,assigns in task_vars for e,x in assigns if solver.value(x)]
+        schedule['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=solver.value(gap)) for o,gap in gaps if solver.value(gap)]
         schedule['objective']=solver.objective_value
         schedule['bound']=solver.best_objective_bound
         result=validate(data,schedule)
