@@ -158,6 +158,12 @@ def check_input(d):
             require(e['profiles'] and set(e['profiles']) <= profiles, 'Ogiltiga passprofiler.')
             require(e['hourlyCost'] is None or numeric(e['hourlyCost'],0,100000), 'Ogiltig timkostnad.')
             require(isinstance(e['skills'],list) and all(isinstance(k,str) for k in e['skills']), 'Ogiltig kompetens.')
+            if e.get('ssgWindows') is not None:
+                require(isinstance(e['ssgWindows'], list), 'Ogiltiga SSG-fönster.')
+                for w in e['ssgWindows']:
+                    require(isinstance(w, dict) and w.get('start') <= w.get('end'), 'Ogiltigt SSG-fönster.')
+                    date.fromisoformat(w['start']); date.fromisoformat(w['end'])
+                    require(numeric(w['ssg'], 0, 100), 'Ogiltig SSG i fönster.')
         for t in d['interventions']:
             require(t['customerId'] in customers and t['type'] in ['fixed','flexible'], 'Ogiltig insats/kund.')
             require(numeric(t['minutes'],1,480,True) and type(t['doubleStaff']) is bool, 'Ogiltig insatslängd eller dubbelbemanning.')
@@ -167,6 +173,8 @@ def check_input(d):
                 date.fromisoformat(t['date'])
             for value in [t['start'],t['latestEnd']]:
                 require(bool(re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',value)), 'Ogiltig tid.')
+            if t.get('requiredEmployeeId') is not None:
+                require(t['requiredEmployeeId'] in employees, 'Insatsen kräver en okänd medarbetare.')
         for a in d['absences']:
             require(a['employeeId'] in employees and a['start'] <= a['end'], 'Ogiltig frånvaro.')
             instant(a['start'],'00:00'); instant(a['end'],'00:00')

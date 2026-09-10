@@ -11,6 +11,18 @@ from .domain import (check_input, occurrences, span, paid, overlap, intersect,
 from .validate import validate
 
 
+def ssg_for_day(e, day):
+    ssg = e['ssg']
+    for w in e.get('ssgWindows') or []:
+        if w['start'] <= day <= w['end']:
+            ssg = w['ssg']
+    return ssg
+
+
+def ssg_cap_minutes(e, period_days, rules):
+    return sum(ssg_for_day(e, day) / 100 * rules['fullTimeWeeklyHours'] * 60 / 7 for day in period_days)
+
+
 def solve(data, seconds=30):
     from ortools.sat.python import cp_model
     check_input(data)
@@ -63,7 +75,7 @@ def solve(data, seconds=30):
                 if a['work'] and b['work']:
                     if b['a']-a['b']>=rules['minRestHours']*60: break
                     model.add(a['x']+b['x']<=1)
-        cap=floor(e['ssg']/100*rules['fullTimeWeeklyHours']*60*len(period_days)/7+1e-7)
+        cap=floor(ssg_cap_minutes(e,period_days,rules)+1e-7)
         used=sum(min_period(c)*c['x'] for c in rows)+sum(min_period(c) for c in fixed)
         model.add(used<=cap)
         if cap>0:
@@ -139,6 +151,8 @@ def solve(data, seconds=30):
         assigns=[]
         for e in employees:
             if not set(o['task']['skills'])<=set(e['skills']): continue
+            krav = o['task'].get('requiredEmployeeId')
+            if krav and e['id'] != krav: continue
             candidates_for_e=[c for c in candidates+boundaries if c['shift']['employeeId']==e['id']]
             options=[]
             for c in candidates_for_e:

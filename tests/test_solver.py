@@ -32,3 +32,17 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(len(r['schedule']['assignments']),1);self.assertEqual(sum(u['count'] for u in r['schedule']['uncovered']),1);self.assertTrue(r['validation']['valid'])
     def test_flexible_tasks_can_be_sequenced(self):
         d,_=fixture();d['interventions'][0].update(type='flexible',latestEnd='11:00');d['interventions'].append({**d['interventions'][0],'id':'t2'});r=solve(d,5);self.assertIn(r['schedule']['solverStatus'],['OPTIMAL','FEASIBLE']);self.assertTrue(r['validation']['valid']);self.assertEqual(r['schedule']['uncovered'],[])
+    def test_required_employee_is_honoured(self):
+        d,_=fixture()
+        d['employees'].append({**d['employees'][0],'id':'e2','code':'M02'})
+        d['interventions'][0]['requiredEmployeeId']='e2'
+        r=solve(d,8)
+        self.assertIn(r['schedule']['solverStatus'],['OPTIMAL','FEASIBLE'])
+        for a in r['schedule']['assignments']:
+            self.assertEqual(a['employeeId'],'e2')
+    def test_dated_ssg_caps_hours(self):
+        d,_=fixture()
+        d['employees'][0]['ssgWindows']=[dict(start='2026-09-07',end='2026-09-13',ssg=0)]
+        r=solve(d,5)
+        self.assertIn(r['schedule']['solverStatus'],['OPTIMAL','FEASIBLE'])
+        self.assertEqual(sum(u['count'] for u in r['schedule']['uncovered']),1)

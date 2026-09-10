@@ -114,6 +114,9 @@ def validate(data, schedule):
                 e=employees.get(a['employeeId'])
                 if not e or e['status']!='active' or not set(o['task']['skills'])<=set(e['skills']):
                     issue('TASK_SKILL','Insatsen saknar behörig medarbetare.',**meta)
+                krav=o['task'].get('requiredEmployeeId')
+                if krav and a['employeeId']!=krav:
+                    issue('TASK_SKILL','Insatsen måste ligga på utsedd medarbetare.',**meta)
                 if not any(s['employeeId']==a['employeeId'] and any(x<=a['start'] and y>=a['end'] for x,y in s['work']) for s in processed):
                     issue('ON_DUTY','Medarbetaren är inte i tjänst hela insatsen.',**meta)
         for e in employees.values():
