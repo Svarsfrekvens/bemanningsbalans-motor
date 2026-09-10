@@ -30,7 +30,10 @@ async def protect(request:Request,call_next):
     from fastapi.responses import JSONResponse
     token=os.environ.get('BB_API_TOKEN','')
     if request.url.path.startswith('/api/'):
-        if token:
+        # Hälsokollen är öppen så appen kan se att motorn lever utan att skicka token.
+        if request.method == 'GET' and request.url.path.rstrip('/') == '/api/health':
+            pass
+        elif token:
             supplied=request.headers.get('authorization','')
             if not secrets.compare_digest(supplied,'Bearer '+token):
                 return JSONResponse({'detail':'Åtkomst nekad.'},status_code=401)

@@ -54,6 +54,12 @@ def overlap(a, b, c, d):
 
 
 def paid(shift):
+    # Sovande jour är inte arbetstid: den ingår inte i SSG, veckotimmar,
+    # kostnad eller insatsbemanning. Spännvidden (span) används fortfarande
+    # så att jour inte kan överlappa ett arbetspass.
+    if shift.get('type') == 'jour':
+        span(shift)
+        return []
     a, b = span(shift)
     cursor, result = a, []
     for br in sorted(shift['breaks'], key=lambda x: x['offset']):
@@ -71,6 +77,12 @@ def paid(shift):
 def night_intervals(start, end):
     for day in days(add_days(start, -1), end):
         yield instant(day, '22:00'), instant(add_days(day, 1), '06:00')
+
+
+def jour_intervals(start, end):
+    """Sovande jour enligt styrande villkor: 23:00–06:30."""
+    for day in days(add_days(start, -1), end):
+        yield instant(day, '23:00'), instant(add_days(day, 1), '06:30')
 
 
 def is_night(a, b):
@@ -148,13 +160,20 @@ def check_input(d):
             instant(a['start'],'00:00'); instant(a['end'],'00:00')
         for key, lo, hi, integer in [('minRestHours',11,48,False),('fullTimeWeeklyHours',1,60,False),('maxWeeklyHours',1,60,False),('maxShiftHours',1,16,False),('maxConsecutiveDays',1,7,True),('nightFloor',0,10,True),('flexibilityStep',1,60,True)]:
             require(numeric(d['rules'][key],lo,hi,integer), f'Ogiltig regel: {key}.')
+        if 'jourFloor' in d['rules']:
+            require(numeric(d['rules']['jourFloor'], 0, 10, True), 'Ogiltig regel: jourFloor.')
         require(numeric(d['economy']['hourlyCost'],0,100000), 'Ogiltig timkostnad.')
+        ow = d.get('objectiveWeights') or {}
+        require(isinstance(ow, dict), 'Ogiltiga målviktningar.')
+        for key in ('continuitySek', 'spreadSekPerPermille'):
+            if key in ow:
+                require(numeric(ow[key], 0, 10000), f'Ogiltig målvikt: {key}.')
         require(type(d['boundaryAcknowledged']) is bool,'Periodgränser måste bekräftas explicit.')
         for s in d['boundaryShifts']:
             require(s['employeeId'] in employees, 'Gränspass saknar medarbetare.')
             paid(s)
         for t in d['templates']:
-            require(t['type'] in ['day','evening','night'], 'Ogiltig passtyp.')
+            require(t['type'] in ['day','evening','night','jour'], 'Ogiltig passtyp.')
             require(isinstance(t['skills'],list), 'Passkompetens saknas.')
             for day in days(wp['start'],wp['end']):
                 paid({**t,'date':day})

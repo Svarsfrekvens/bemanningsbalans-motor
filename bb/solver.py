@@ -7,7 +7,7 @@ relationship + 2.50 SEK per permille of workload-utilisation spread.
 from math import floor
 from uuid import uuid4
 from .domain import (check_input, occurrences, span, paid, overlap, intersect,
-                     instant, add_days, days, night_intervals, is_night, monday)
+                     instant, add_days, days, night_intervals, jour_intervals, is_night, monday)
 from .validate import validate
 
 
@@ -21,6 +21,7 @@ def solve(data, seconds=30):
     employees=[e for e in data['employees'] if e['status']=='active']
     templates={t['id']:t for t in data['templates']}
     occ=occurrences(data)
+    jour_floor=int(rules.get('jourFloor') or 0)
     model=cp_model.CpModel()
     candidates=[]
     boundaries=[]
@@ -33,13 +34,15 @@ def solve(data, seconds=30):
         for day in days(add_days(wp['start'],-1),wp['end']):
             for profile in e['profiles']:
                 t=templates[profile]
+                if t['type']=='jour' and not jour_floor: continue
                 s=dict(id=f"{e['id']}:{day}:{profile}",employeeId=e['id'],date=day,start=t['start'],end=t['end'],type=t['type'],skills=t['skills'],breaks=t['breaks'])
                 a,b=span(s)
                 if b<=lo or a>=hi or b-a>rules['maxShiftHours']*60: continue
                 if not set(t['skills'])<=set(e['skills']) or (is_night(a,b) and not e['night']): continue
                 if any(overlap(a,b,x,y) for x,y in absences): continue
-                if any(not (a-v['b']>=rules['minRestHours']*60 or v['a']-b>=rules['minRestHours']*60) for v in boundary): continue
                 work=paid(s)
+                if any(overlap(a,b,v['a'],v['b']) for v in boundary): continue
+                if work and any(v['work'] and not (a-v['b']>=rules['minRestHours']*60 or v['a']-b>=rules['minRestHours']*60) for v in boundary): continue
                 x=model.new_bool_var('shift:'+s['id'])
                 candidates.append(dict(shift=s,a=a,b=b,work=work,x=x))
     if len(candidates)>10000:
@@ -54,8 +57,12 @@ def solve(data, seconds=30):
         fixed=[b for b in boundaries if b['shift']['employeeId']==e['id']]
         for i,a in enumerate(rows):
             for b in rows[i+1:]:
-                if b['a']-a['b']>=rules['minRestHours']*60: break
-                model.add(a['x']+b['x']<=1)
+                if overlap(a['a'],a['b'],b['a'],b['b']):
+                    model.add(a['x']+b['x']<=1)
+                    continue
+                if a['work'] and b['work']:
+                    if b['a']-a['b']>=rules['minRestHours']*60: break
+                    model.add(a['x']+b['x']<=1)
         cap=floor(e['ssg']/100*rules['fullTimeWeeklyHours']*60*len(period_days)/7+1e-7)
         used=sum(min_period(c)*c['x'] for c in rows)+sum(min_period(c) for c in fixed)
         model.add(used<=cap)
@@ -72,13 +79,22 @@ def solve(data, seconds=30):
         for day in days(add_days(wp['start'],-rules['maxConsecutiveDays']),add_days(wp['end'],rules['maxConsecutiveDays'])):
             a,b=instant(day,'00:00'),instant(add_days(day,1),'00:00')
             flag=model.new_bool_var('workday:'+e['id']+day)
-            covering=[c['x'] for c in rows+fixed if overlap(c['a'],c['b'],a,b)]
+            covering=[c['x'] for c in rows+fixed if any(overlap(x,y,a,b) for x,y in c['work'])]
             if covering: model.add_max_equality(flag,covering)
             else: model.add(flag==0)
             flags.append(flag)
         window=rules['maxConsecutiveDays']+1
         for i in range(len(flags)-window+1):
             model.add(sum(flags[i:i+window])<=rules['maxConsecutiveDays'])
+        jour_rows=[c for c in rows+fixed if c['shift'].get('type')=='jour']
+        for start_day in sorted({c['shift']['date'] for c in jour_rows}):
+            limit=add_days(start_day,27)
+            model.add(sum((c['b']-c['a'])*c['x'] for c in jour_rows if start_day<=c['shift']['date']<=limit)<=48*60)
+        per_manad={}
+        for c in jour_rows:
+            per_manad.setdefault(c['shift']['date'][:7],[]).append(c)
+        for grupp in per_manad.values():
+            model.add(sum((c['b']-c['a'])*c['x'] for c in grupp)<=50*60)
 
     # Awake-night floor counts on-duty, eligible people. Rest constraints prevent
     # a person from being counted through two simultaneous candidate shifts.
@@ -91,6 +107,16 @@ def solve(data, seconds=30):
         for edge in edges[:-1]:
             model.add(sum(x for u,v,x in coverage if u<=edge<v)>=rules['nightFloor'])
 
+    if jour_floor:
+        valid_ids={e['id'] for e in employees if e['night']}
+        for a,b in jour_intervals(wp['start'],wp['end']):
+            a,b=max(a,lo),min(b,hi)
+            if a>=b: continue
+            coverage=[(c['a'],c['b'],c['x']) for c in candidates+boundaries if c['shift'].get('type')=='jour' and c['shift']['employeeId'] in valid_ids]
+            edges=sorted({a,b}|{t for u,v,_ in coverage for t in (u,v) if a<t<b})
+            for edge in edges[:-1]:
+                model.add(sum(x for u,v,x in coverage if u<=edge<v)>=jour_floor)
+
     task_vars=[]
     # Ge CP-SAT en omedelbart giltig startpunkt: inga valda pass och allt
     # kundbehov öppet redovisat som obemannat. Utan denna startpunkt kunde den
@@ -101,7 +127,6 @@ def solve(data, seconds=30):
     support_hints=[]
     per_employee={e['id']:[] for e in employees}
     customer_links={}
-    support_index={}
     supports_count=0
     gaps=[]
     for o in occ:
@@ -127,7 +152,6 @@ def solve(data, seconds=30):
                     model.add(start>=a-lo).only_enforce_if(z)
                     model.add(end<=b-lo).only_enforce_if(z)
                     options.append(z)
-                    support_index.setdefault((o['id'],e['id']),[]).append((z,c,a,b))
             if not options: continue
             selected=model.new_bool_var('assign:'+o['id']+':'+e['id'])
             support_hints.append(selected)
@@ -156,112 +180,27 @@ def solve(data, seconds=30):
         mx=model.new_int_var(0,1000,'max_util');mn=model.new_int_var(0,1000,'min_util')
         model.add_max_equality(mx,utilisations);model.add_min_equality(mn,utilisations)
         spread=mx-mn
+    ow=data.get('objectiveWeights') or {}
+    continuity_ore=int(round(float(ow.get('continuitySek',50))*100))
+    spread_ore=int(round(float(ow.get('spreadSekPerPermille',2.5))*100))
     # 50 000 öre (500 kr) per obemannad insatsminut. Det är tusenfalt dyrare än
     # att lägga ett pass, så täckning går alltid före kostnad, kontinuitet och
     # jämn belastning. Hårda villkor lättas aldrig – obemannat behov redovisas.
     uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
-    model.minimize(cost+5000*sum(links)+250*spread+50000*uncovered_minutes)
-    # Girig startlösning: fördela behoven på befintliga passalternativ så att
-    # även en svag server hinner returnera ett bra förslag inom tidsgränsen.
-    # CP-SAT reparerar/förbättrar hinten; den behöver inte vara fullständigt
-    # regelren, men vi respekterar vila, kompetens och överlapp direkt.
-    chosen={e['id']:[] for e in employees}      # valda kandidatpass per person
-    busy={e['id']:[] for e in employees}        # tilldelade insatsintervall
-    rest=rules['minRestHours']*60
-    fixed_by_emp={e['id']:[b for b in boundaries if b['shift']['employeeId']==e['id']] for e in employees}
-    cap_by_emp={e['id']:floor(e['ssg']/100*rules['fullTimeWeeklyHours']*60*len(period_days)/7+1e-7) for e in employees}
-    used_min={e['id']:sum(min_period(v) for v in fixed_by_emp[e['id']]) for e in employees}
-    week_cap=floor(rules['maxWeeklyHours']*60)
-    week_min={e['id']:{} for e in employees}
-    for e in employees:
-        for v in fixed_by_emp[e['id']]:
-            for a,b in v['work']:
-                key=monday(v['shift']['date'])
-                week_min[e['id']][key]=week_min[e['id']].get(key,0)+intersect(a,b,lo,hi)
-    day_set={e['id']:{v['shift']['date'] for v in fixed_by_emp[e['id']]} for e in employees}
-    max_days=rules['maxConsecutiveDays']
-
-    def week_load(e_id,c):
-        key=monday(c['shift']['date'])
-        return week_min[e_id].get(key,0)+min_period(c)
-
-    def days_ok(e_id,c):
-        marked=day_set[e_id]|{c['shift']['date']}
-        run=0
-        for day in days(add_days(wp['start'],-max_days),add_days(wp['end'],max_days)):
-            run=run+1 if day in marked else 0
-            if run>max_days: return False
-        return True
-
-    def fits(e_id,c):
-        for v in chosen[e_id]+fixed_by_emp[e_id]:
-            if not (c['a']-v['b']>=rest or v['a']-c['b']>=rest): return False
-        if used_min[e_id]+min_period(c)>cap_by_emp[e_id]: return False
-        if week_load(e_id,c)>week_cap: return False
-        return days_ok(e_id,c)
-
-    greedy_shift=set()
-    greedy_support=set()
-    greedy_start={}
-    greedy_gap={}
-    greedy_assign=[]
-    greedy_chosen=[]
-    for o,start,end,assigns in task_vars:
-        dur=o['task']['minutes']
-        placed=0
-        s0=o['earliest']
-        used_start=None
-        while s0<=o['latest'] and placed<o['count']:
-            t0,t1=s0,s0+dur
-            # Ta den minst belastade personen först så att kapaciteten räcker längre.
-            order=sorted(assigns,key=lambda pair:(used_min[pair[0]]/max(1,cap_by_emp[pair[0]]),pair[0]))
-            for e_id,sel in order:
-                if placed>=o['count']: break
-                if any(not (t1<=u or t0>=v) for u,v in busy[e_id]): continue
-                hit=None
-                for z,c,a,b in support_index.get((o['id'],e_id),[]):
-                    if a>t0 or b<t1: continue
-                    if id(c) in greedy_shift or isinstance(c['x'],int):
-                        hit=(z,c,False);break
-                    if fits(e_id,c):
-                        hit=(z,c,True);break
-                if not hit: continue
-                z,c,fresh=hit
-                if fresh:
-                    greedy_chosen.append(c)
-                    chosen[e_id].append(c)
-                    used_min[e_id]+=min_period(c)
-                    key=monday(c['shift']['date'])
-                    week_min[e_id][key]=week_min[e_id].get(key,0)+min_period(c)
-                    day_set[e_id].add(c['shift']['date'])
-                greedy_shift.add(id(c))
-                busy[e_id].append((t0,t1))
-                greedy_support.add(id(z))
-                greedy_assign.append(dict(occurrenceId=o['id'],employeeId=e_id,start=t0,end=t1))
-                placed+=1
-                if used_start is None: used_start=t0
-            if placed<o['count']:
-                s0+=rules['flexibilityStep']
-
-        if placed:
-            greedy_start[o['id']]=(used_start-lo,used_start-lo+dur)
-
-        greedy_gap[o['id']]=o['count']-placed
-
-
+    model.minimize(cost+continuity_ore*sum(links)+spread_ore*spread+50000*uncovered_minutes)
     for c in candidates:
-        model.add_hint(c['x'],1 if id(c) in greedy_shift else 0)
+        model.add_hint(c['x'],0)
     for x in support_hints:
-        model.add_hint(x,1 if id(x) in greedy_support else 0)
+        model.add_hint(x,0)
     for o,start,end,_ in task_vars:
-        first,last=greedy_start.get(o['id'],(o['earliest']-lo,o['earliest']-lo+o['task']['minutes']))
+        first=o['earliest']-lo
         model.add_hint(start,first)
-        model.add_hint(end,last)
+        model.add_hint(end,first+o['task']['minutes'])
     for o,gap in gaps:
-        model.add_hint(gap,greedy_gap.get(o['id'],o['count']))
+        model.add_hint(gap,o['count'])
     solver=cp_model.CpSolver()
     solver.parameters.max_time_in_seconds=seconds
-    solver.parameters.num_search_workers=4
+    solver.parameters.num_search_workers=8
     solver.parameters.random_seed=41
     status=solver.solve(model)
     code=solver.status_name(status)
@@ -278,21 +217,12 @@ def solve(data, seconds=30):
         schedule['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=solver.value(gap)) for o,gap in gaps if solver.value(gap)]
         schedule['objective']=solver.objective_value
         schedule['bound']=solver.best_objective_bound
+        cost_val=int(round(sum(round(min_period(c)/60*wages[c['shift']['employeeId']]*100)*solver.value(c['x']) for c in candidates)))
+        cont_val=continuity_ore*sum(solver.value(x) for x in links)
+        spread_val=spread_ore*(solver.value(spread) if utilisations else 0)
+        schedule['objectiveBreakdown']=dict(costOre=cost_val,continuityOre=int(cont_val),spreadOre=int(spread_val))
         result=validate(data,schedule)
         if not result['valid']:
             schedule.update(solverStatus='MODEL_INVALID',shifts=[],assignments=[],explanation='Förslaget stoppades av den fristående kontrollen: '+result['errors'][0]['message'])
         return dict(schedule=schedule,validation=result,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
-    # Hinner sökningen inte fram till en egen lösning (svag server, kort
-    # tidsgräns) använder vi den giriga startlösningen – men bara om den
-    # fristående kontrollen godkänner den. Hårda villkor lättas aldrig.
-    if greedy_assign:
-        fallback=dict(schedule)
-        fallback['shifts']=[c['shift'] for c in greedy_chosen]
-        fallback['assignments']=list(greedy_assign)
-        fallback['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=greedy_gap.get(o['id'],o['count'])) for o,_ in gaps if greedy_gap.get(o['id'],o['count'])]
-        check=validate(data,fallback)
-        if check['valid']:
-            fallback.update(solverStatus='FEASIBLE',explanation='En giltig lösning togs fram med den snabba startberäkningen inom tidsgränsen. Bästa möjliga lösning är inte bevisad.')
-            return dict(schedule=fallback,validation=check,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
     return dict(schedule=schedule,validation=None,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
-

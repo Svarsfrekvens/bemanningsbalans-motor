@@ -1,6 +1,6 @@
 """Independent validator. It never imports solver.py or trusts solver status."""
 from .domain import (check_input, occurrences, span, paid, overlap, intersect, instant,
-                     add_days, days, parts, night_intervals, is_night, monday)
+                     add_days, days, parts, night_intervals, jour_intervals, is_night, monday)
 
 
 def validate(data, schedule):
@@ -34,7 +34,7 @@ def validate(data, schedule):
                 meta = dict(employeeId=e['id'],shiftId=s['id'])
                 if s['id'] not in boundaries and e['status'] != 'active':
                     issue('STATUS',f"{e['code']}: inte aktiv.",**meta)
-                if not e['night'] and is_night(a,b):
+                if not e['night'] and (s.get('type') == 'jour' or is_night(a,b)):
                     issue('NIGHT',f"{e['code']}: saknar nattbehörighet.",**meta)
                 if not set(s['skills']) <= set(e['skills']):
                     issue('SKILL',f"{e['code']}: saknar passkompetens.",**meta)
@@ -49,8 +49,10 @@ def validate(data, schedule):
             for i,s in enumerate(shifts):
                 for previous in shifts[:i]:
                     gap = s['a']-previous['b']
-                    if gap < r['minRestHours']*60:
-                        issue('SHIFT_OVERLAP' if gap < 0 else 'REST',f"{e['code']}: {gap/60:g} timmars vila före {s['date']} {s['start']}.",employeeId=e['id'],shiftId=s['id'])
+                    if gap < 0:
+                        issue('SHIFT_OVERLAP',f"{e['code']}: {gap/60:g} timmars vila före {s['date']} {s['start']}.",employeeId=e['id'],shiftId=s['id'])
+                    elif previous['work'] and s['work'] and gap < r['minRestHours']*60:
+                        issue('REST',f"{e['code']}: {gap/60:g} timmars vila före {s['date']} {s['start']}.",employeeId=e['id'],shiftId=s['id'])
             used = sum(intersect(a,b,lo,hi) for s in shifts for a,b in s['work'])
             cap = e['ssg']/100*r['fullTimeWeeklyHours']*60*len(list(days(wp['start'],wp['end'])))/7
             if used > cap+0.01:
@@ -62,9 +64,24 @@ def validate(data, schedule):
             run = 0
             for day in days(add_days(wp['start'],-r['maxConsecutiveDays']),add_days(wp['end'],r['maxConsecutiveDays'])):
                 a,b = instant(day,'00:00'),instant(add_days(day,1),'00:00')
-                run = run+1 if any(overlap(s['a'],s['b'],a,b) for s in shifts) else 0
+                run = run+1 if any(any(overlap(x,y,a,b) for x,y in s['work']) for s in shifts) else 0
                 if run==r['maxConsecutiveDays']+1:
                     issue('CONSECUTIVE',f"{e['code']}: för många kalenderdagar med arbete i följd.",employeeId=e['id'])
+            jour = [s for s in shifts if s.get('type') == 'jour']
+            sorterade = sorted(jour, key=lambda s: s['date'])
+            for i, start in enumerate(sorterade):
+                gransen = add_days(start['date'], 27)
+                total = sum(s['b'] - s['a'] for s in sorterade[i:] if s['date'] <= gransen)
+                if total > 48 * 60 + 0.01:
+                    issue('JOUR_4W', f"{e['code']}: mer än 48 timmar jourtid under fyra veckor från {start['date']}.", employeeId=e['id'])
+                    break
+            per_manad = {}
+            for s in sorterade:
+                k = s['date'][:7]
+                per_manad[k] = per_manad.get(k, 0) + (s['b'] - s['a'])
+            for manad, total in per_manad.items():
+                if total > 50 * 60 + 0.01:
+                    issue('JOUR_MONTH', f"{e['code']}: mer än 50 timmar jourtid i {manad}.", employeeId=e['id'])
         assignments=schedule['assignments']
         known={o['id'] for o in occ}
         # Ett förslag får redovisa obemannat behov, men bara om det är öppet
@@ -113,6 +130,16 @@ def validate(data, schedule):
             for t in points[:-1]:
                 if len({e for x,y,e in work if x<=t<y})<r['nightFloor']:
                     issue('NIGHT_FLOOR',f"Vaken natt saknar täckning {' '.join(parts(t))}."); break
+        jour_floor = int(r.get('jourFloor') or 0)
+        if jour_floor:
+            for a,b in jour_intervals(wp['start'],wp['end']):
+                a,b=max(a,lo),min(b,hi)
+                if a>=b: continue
+                covering=[(s['a'],s['b'],s['employeeId']) for s in processed if s.get('type')=='jour' and employees.get(s['employeeId'],{}).get('night') and employees[s['employeeId']]['status']=='active']
+                points=sorted({a,b}|{t for x,y,_ in covering for t in (x,y) if a<t<b})
+                for t in points[:-1]:
+                    if len({e for x,y,e in covering if x<=t<y})<jour_floor:
+                        issue('JOUR_FLOOR',f"Sovande jour saknar täckning {' '.join(parts(t))}."); break
     except (KeyError,TypeError,ValueError) as exc:
         issue('STRUCTURE',f'Schemat kunde inte läsas: {exc}')
     if not data['boundaryAcknowledged']:
