@@ -3,7 +3,7 @@ import unittest
 from collections import defaultdict
 from copy import deepcopy
 from test_rules import fixture
-from bb.domain import instant, paid, span
+from bb.domain import check_input, instant, jour_intervals, paid, span
 from bb.validate import validate
 from bb.solver import solve
 
@@ -93,6 +93,31 @@ class SovandeJour(unittest.TestCase):
             end=instant('2026-09-08', '00:30'),
         )]
         self.assertIn('ON_DUTY', {e['rule'] for e in validate(d, s)['errors']})
+
+    def test_jour_intervals_default_2300_0630(self):
+        xs = list(jour_intervals('2026-09-07', '2026-09-07'))
+        self.assertIn((instant('2026-09-07', '23:00'), instant('2026-09-08', '06:30')), xs)
+        self.assertIn((instant('2026-09-06', '23:00'), instant('2026-09-07', '06:30')), xs)
+
+    def test_jour_intervals_uses_rules_clock_and_weekdays(self):
+        rules = dict(jour=dict(start='22:00', end='07:00', weekdays=[1]))
+        xs = list(jour_intervals('2026-09-07', '2026-09-08', rules))
+        self.assertIn((instant('2026-09-07', '22:00'), instant('2026-09-08', '07:00')), xs)
+        self.assertNotIn(instant('2026-09-08', '22:00'), [a for a, _ in xs])
+
+    def test_check_input_rejects_invalid_jour(self):
+        d, _ = fixture()
+        d['rules']['jour'] = dict(start='25:00', end='06:30', weekdays=[1, 2, 3, 4, 5, 6, 7])
+        with self.assertRaises(ValueError):
+            check_input(d)
+        d['rules']['jour'] = dict(start='23:00', end='06:30', weekdays=[])
+        with self.assertRaises(ValueError):
+            check_input(d)
+
+    def test_check_input_accepts_default_jour(self):
+        d, _ = fixture()
+        d['rules']['jour'] = dict(start='23:00', end='06:30', weekdays=[1, 2, 3, 4, 5, 6, 7])
+        check_input(d)
 
 
 @unittest.skipUnless(importlib.util.find_spec('ortools'), 'OR-Tools saknas: solver-tester är INTE körda')

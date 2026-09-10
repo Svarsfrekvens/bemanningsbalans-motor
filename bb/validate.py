@@ -132,7 +132,7 @@ def validate(data, schedule):
                     issue('NIGHT_FLOOR',f"Vaken natt saknar täckning {' '.join(parts(t))}."); break
         jour_floor = int(r.get('jourFloor') or 0)
         if jour_floor:
-            for a,b in jour_intervals(wp['start'],wp['end']):
+            for a,b in jour_intervals(wp['start'],wp['end'],r):
                 a,b=max(a,lo),min(b,hi)
                 if a>=b: continue
                 covering=[(s['a'],s['b'],s['employeeId']) for s in processed if s.get('type')=='jour' and employees.get(s['employeeId'],{}).get('night') and employees[s['employeeId']]['status']=='active']

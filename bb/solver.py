@@ -109,7 +109,7 @@ def solve(data, seconds=30):
 
     if jour_floor:
         valid_ids={e['id'] for e in employees if e['night']}
-        for a,b in jour_intervals(wp['start'],wp['end']):
+        for a,b in jour_intervals(wp['start'],wp['end'],rules):
             a,b=max(a,lo),min(b,hi)
             if a>=b: continue
             coverage=[(c['a'],c['b'],c['x']) for c in candidates+boundaries if c['shift'].get('type')=='jour' and c['shift']['employeeId'] in valid_ids]
@@ -183,11 +183,11 @@ def solve(data, seconds=30):
     ow=data.get('objectiveWeights') or {}
     continuity_ore=int(round(float(ow.get('continuitySek',50))*100))
     spread_ore=int(round(float(ow.get('spreadSekPerPermille',2.5))*100))
-    # 50 000 öre (500 kr) per obemannad insatsminut. Det är tusenfalt dyrare än
-    # att lägga ett pass, så täckning går alltid före kostnad, kontinuitet och
-    # jämn belastning. Hårda villkor lättas aldrig – obemannat behov redovisas.
+    # Default 500 kr per obemannad insatsminut (samma styrka som tidigare 50 000 öre).
+    # Täckning går före kostnad, kontinuitet och jämn belastning. Hårda villkor lättas aldrig.
+    uncovered_ore=int(round(float(ow.get('uncoveredSekPerMinute',500))*100))
     uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
-    model.minimize(cost+continuity_ore*sum(links)+spread_ore*spread+50000*uncovered_minutes)
+    model.minimize(cost+continuity_ore*sum(links)+spread_ore*spread+uncovered_ore*uncovered_minutes)
     for c in candidates:
         model.add_hint(c['x'],0)
     for x in support_hints:

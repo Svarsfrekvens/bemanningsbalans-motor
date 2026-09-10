@@ -79,10 +79,22 @@ def night_intervals(start, end):
         yield instant(day, '22:00'), instant(add_days(day, 1), '06:00')
 
 
-def jour_intervals(start, end):
-    """Sovande jour enligt styrande villkor: 23:00–06:30."""
+def jour_spec(rules=None):
+    """Sovande jour: 23:00–06:30 alla veckodagar om inget annat anges."""
+    spec = ((rules or {}).get('jour') or {})
+    start = spec.get('start') or '23:00'
+    end = spec.get('end') or '06:30'
+    weekdays = spec.get('weekdays') or [1, 2, 3, 4, 5, 6, 7]
+    return start, end, weekdays
+
+
+def jour_intervals(start, end, rules=None):
+    clock_start, clock_end, weekdays = jour_spec(rules)
     for day in days(add_days(start, -1), end):
-        yield instant(day, '23:00'), instant(add_days(day, 1), '06:30')
+        if date.fromisoformat(day).isoweekday() not in weekdays:
+            continue
+        stop = instant(add_days(day, 1) if clock_end <= clock_start else day, clock_end)
+        yield instant(day, clock_start), stop
 
 
 def is_night(a, b):
@@ -162,10 +174,24 @@ def check_input(d):
             require(numeric(d['rules'][key],lo,hi,integer), f'Ogiltig regel: {key}.')
         if 'jourFloor' in d['rules']:
             require(numeric(d['rules']['jourFloor'], 0, 10, True), 'Ogiltig regel: jourFloor.')
+        jour = d['rules'].get('jour')
+        if jour is not None:
+            require(isinstance(jour, dict), 'Ogiltig regel: jour.')
+            for key in ('start', 'end'):
+                if key in jour:
+                    require(bool(re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', jour[key])), f'Ogiltig jourtid: {key}.')
+            if 'weekdays' in jour:
+                require(
+                    isinstance(jour['weekdays'], list)
+                    and jour['weekdays']
+                    and all(type(x) is int for x in jour['weekdays'])
+                    and set(jour['weekdays']) <= set(range(1, 8)),
+                    'Ogiltiga jour-veckodagar.',
+                )
         require(numeric(d['economy']['hourlyCost'],0,100000), 'Ogiltig timkostnad.')
         ow = d.get('objectiveWeights') or {}
         require(isinstance(ow, dict), 'Ogiltiga målviktningar.')
-        for key in ('continuitySek', 'spreadSekPerPermille'):
+        for key in ('continuitySek', 'spreadSekPerPermille', 'uncoveredSekPerMinute'):
             if key in ow:
                 require(numeric(ow[key], 0, 10000), f'Ogiltig målvikt: {key}.')
         require(type(d['boundaryAcknowledged']) is bool,'Periodgränser måste bekräftas explicit.')
