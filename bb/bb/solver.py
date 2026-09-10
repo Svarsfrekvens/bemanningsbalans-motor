@@ -92,8 +92,16 @@ def solve(data, seconds=30):
             model.add(sum(x for u,v,x in coverage if u<=edge<v)>=rules['nightFloor'])
 
     task_vars=[]
+    # Ge CP-SAT en omedelbart giltig startpunkt: inga valda pass och allt
+    # kundbehov öppet redovisat som obemannat. Utan denna startpunkt kunde den
+    # stora Galaxen-modellen använda hela tidsgränsen i presolve/sökning och
+    # svara UNKNOWN trots att den mjuka täckningsmodellen alltid har en lösning.
+    # Motorn förbättrar därefter startpunkten genom att välja pass och bemanna.
+    shift_hints=[]
+    support_hints=[]
     per_employee={e['id']:[] for e in employees}
     customer_links={}
+    support_index={}
     supports_count=0
     gaps=[]
     for o in occ:
@@ -112,14 +120,17 @@ def solve(data, seconds=30):
                 for a,b in c['work']:
                     if b-a<duration or b<o['earliest']+duration or a>o['latest']: continue
                     z=model.new_bool_var('support:'+str(supports_count));supports_count+=1
+                    support_hints.append(z)
                     if supports_count>120000:
                         raise ValueError('För många möjliga insatstilldelningar. Förkorta perioden.')
                     model.add(z<=c['x'])
                     model.add(start>=a-lo).only_enforce_if(z)
                     model.add(end<=b-lo).only_enforce_if(z)
                     options.append(z)
+                    support_index.setdefault((o['id'],e['id']),[]).append((z,c,a,b))
             if not options: continue
             selected=model.new_bool_var('assign:'+o['id']+':'+e['id'])
+            support_hints.append(selected)
             model.add(sum(options)==selected)
             interval=model.new_optional_interval_var(start,duration,end,selected,'task:'+o['id']+':'+e['id'])
             per_employee[e['id']].append(interval)
@@ -150,9 +161,65 @@ def solve(data, seconds=30):
     # jämn belastning. Hårda villkor lättas aldrig – obemannat behov redovisas.
     uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
     model.minimize(cost+5000*sum(links)+250*spread+50000*uncovered_minutes)
+    # Girig startlösning: fördela behoven på befintliga passalternativ så att
+    # även en svag server hinner returnera ett bra förslag inom tidsgränsen.
+    # CP-SAT reparerar/förbättrar hinten; den behöver inte vara fullständigt
+    # regelren, men vi respekterar vila, kompetens och överlapp direkt.
+    chosen={e['id']:[] for e in employees}      # valda kandidatpass per person
+    busy={e['id']:[] for e in employees}        # tilldelade insatsintervall
+    rest=rules['minRestHours']*60
+    fixed_by_emp={e['id']:[b for b in boundaries if b['shift']['employeeId']==e['id']] for e in employees}
+
+    def fits(e_id,c):
+        for v in chosen[e_id]+fixed_by_emp[e_id]:
+            if not (c['a']-v['b']>=rest or v['a']-c['b']>=rest): return False
+        return True
+
+    greedy_shift=set()
+    greedy_support=set()
+    greedy_start={}
+    greedy_gap={}
+    for o,start,end,assigns in task_vars:
+        dur=o['task']['minutes']
+        placed=0
+        s0=o['earliest']
+        used_start=None
+        while s0<=o['latest'] and placed<o['count']:
+            t0,t1=s0,s0+dur
+            for e_id,sel in assigns:
+                if placed>=o['count']: break
+                if any(not (t1<=u or t0>=v) for u,v in busy[e_id]): continue
+                hit=None
+                for z,c,a,b in support_index.get((o['id'],e_id),[]):
+                    if a<=t0 and b>=t1 and (isinstance(c['x'],int) or c in chosen[e_id] or fits(e_id,c)):
+                        hit=(z,c);break
+                if not hit: continue
+                z,c=hit
+                greedy_shift.add(id(c))
+                chosen[e_id].append(c)
+                busy[e_id].append((t0,t1))
+                greedy_support.add(id(z))
+                placed+=1
+                if used_start is None: used_start=t0
+            if placed<o['count']:
+                s0+=rules['flexibilityStep']
+        if placed:
+            greedy_start[o['id']]=(used_start,used_start+dur)
+        greedy_gap[o['id']]=o['count']-placed
+
+    for c in candidates:
+        model.add_hint(c['x'],1 if id(c) in greedy_shift else 0)
+    for x in support_hints:
+        model.add_hint(x,1 if id(x) in greedy_support else 0)
+    for o,start,end,_ in task_vars:
+        first,last=greedy_start.get(o['id'],(o['earliest']-lo,o['earliest']-lo+o['task']['minutes']))
+        model.add_hint(start,first)
+        model.add_hint(end,last)
+    for o,gap in gaps:
+        model.add_hint(gap,greedy_gap.get(o['id'],o['count']))
     solver=cp_model.CpSolver()
     solver.parameters.max_time_in_seconds=seconds
-    solver.parameters.num_search_workers=8
+    solver.parameters.num_search_workers=4
     solver.parameters.random_seed=41
     status=solver.solve(model)
     code=solver.status_name(status)
