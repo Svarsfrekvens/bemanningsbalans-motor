@@ -169,16 +169,43 @@ def solve(data, seconds=30):
     busy={e['id']:[] for e in employees}        # tilldelade insatsintervall
     rest=rules['minRestHours']*60
     fixed_by_emp={e['id']:[b for b in boundaries if b['shift']['employeeId']==e['id']] for e in employees}
+    cap_by_emp={e['id']:floor(e['ssg']/100*rules['fullTimeWeeklyHours']*60*len(period_days)/7+1e-7) for e in employees}
+    used_min={e['id']:sum(min_period(v) for v in fixed_by_emp[e['id']]) for e in employees}
+    week_cap=floor(rules['maxWeeklyHours']*60)
+    week_min={e['id']:{} for e in employees}
+    for e in employees:
+        for v in fixed_by_emp[e['id']]:
+            for a,b in v['work']:
+                key=monday(v['shift']['date'])
+                week_min[e['id']][key]=week_min[e['id']].get(key,0)+intersect(a,b,lo,hi)
+    day_set={e['id']:{v['shift']['date'] for v in fixed_by_emp[e['id']]} for e in employees}
+    max_days=rules['maxConsecutiveDays']
+
+    def week_load(e_id,c):
+        key=monday(c['shift']['date'])
+        return week_min[e_id].get(key,0)+min_period(c)
+
+    def days_ok(e_id,c):
+        marked=day_set[e_id]|{c['shift']['date']}
+        run=0
+        for day in days(add_days(wp['start'],-max_days),add_days(wp['end'],max_days)):
+            run=run+1 if day in marked else 0
+            if run>max_days: return False
+        return True
 
     def fits(e_id,c):
         for v in chosen[e_id]+fixed_by_emp[e_id]:
             if not (c['a']-v['b']>=rest or v['a']-c['b']>=rest): return False
-        return True
+        if used_min[e_id]+min_period(c)>cap_by_emp[e_id]: return False
+        if week_load(e_id,c)>week_cap: return False
+        return days_ok(e_id,c)
 
     greedy_shift=set()
     greedy_support=set()
     greedy_start={}
     greedy_gap={}
+    greedy_assign=[]
+    greedy_chosen=[]
     for o,start,end,assigns in task_vars:
         dur=o['task']['minutes']
         placed=0
@@ -186,26 +213,41 @@ def solve(data, seconds=30):
         used_start=None
         while s0<=o['latest'] and placed<o['count']:
             t0,t1=s0,s0+dur
-            for e_id,sel in assigns:
+            # Ta den minst belastade personen först så att kapaciteten räcker längre.
+            order=sorted(assigns,key=lambda pair:(used_min[pair[0]]/max(1,cap_by_emp[pair[0]]),pair[0]))
+            for e_id,sel in order:
                 if placed>=o['count']: break
                 if any(not (t1<=u or t0>=v) for u,v in busy[e_id]): continue
                 hit=None
                 for z,c,a,b in support_index.get((o['id'],e_id),[]):
-                    if a<=t0 and b>=t1 and (isinstance(c['x'],int) or c in chosen[e_id] or fits(e_id,c)):
-                        hit=(z,c);break
+                    if a>t0 or b<t1: continue
+                    if id(c) in greedy_shift or isinstance(c['x'],int):
+                        hit=(z,c,False);break
+                    if fits(e_id,c):
+                        hit=(z,c,True);break
                 if not hit: continue
-                z,c=hit
+                z,c,fresh=hit
+                if fresh:
+                    greedy_chosen.append(c)
+                    chosen[e_id].append(c)
+                    used_min[e_id]+=min_period(c)
+                    key=monday(c['shift']['date'])
+                    week_min[e_id][key]=week_min[e_id].get(key,0)+min_period(c)
+                    day_set[e_id].add(c['shift']['date'])
                 greedy_shift.add(id(c))
-                chosen[e_id].append(c)
                 busy[e_id].append((t0,t1))
                 greedy_support.add(id(z))
+                greedy_assign.append(dict(occurrenceId=o['id'],employeeId=e_id,start=t0,end=t1))
                 placed+=1
                 if used_start is None: used_start=t0
             if placed<o['count']:
                 s0+=rules['flexibilityStep']
+
         if placed:
-            greedy_start[o['id']]=(used_start,used_start+dur)
+            greedy_start[o['id']]=(used_start-lo,used_start-lo+dur)
+
         greedy_gap[o['id']]=o['count']-placed
+
 
     for c in candidates:
         model.add_hint(c['x'],1 if id(c) in greedy_shift else 0)
@@ -240,4 +282,17 @@ def solve(data, seconds=30):
         if not result['valid']:
             schedule.update(solverStatus='MODEL_INVALID',shifts=[],assignments=[],explanation='Förslaget stoppades av den fristående kontrollen: '+result['errors'][0]['message'])
         return dict(schedule=schedule,validation=result,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
+    # Hinner sökningen inte fram till en egen lösning (svag server, kort
+    # tidsgräns) använder vi den giriga startlösningen – men bara om den
+    # fristående kontrollen godkänner den. Hårda villkor lättas aldrig.
+    if greedy_assign:
+        fallback=dict(schedule)
+        fallback['shifts']=[c['shift'] for c in greedy_chosen]
+        fallback['assignments']=list(greedy_assign)
+        fallback['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=greedy_gap.get(o['id'],o['count'])) for o,_ in gaps if greedy_gap.get(o['id'],o['count'])]
+        check=validate(data,fallback)
+        if check['valid']:
+            fallback.update(solverStatus='FEASIBLE',explanation='En giltig lösning togs fram med den snabba startberäkningen inom tidsgränsen. Bästa möjliga lösning är inte bevisad.')
+            return dict(schedule=fallback,validation=check,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
     return dict(schedule=schedule,validation=None,modelScope=dict(candidateShifts=len(candidates),occurrences=len(occ),startStep=rules['flexibilityStep']))
+
