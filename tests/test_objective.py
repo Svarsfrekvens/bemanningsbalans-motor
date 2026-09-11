@@ -58,7 +58,7 @@ class ObjectiveWeights(unittest.TestCase):
         br = r['schedule']['objectiveBreakdown']
         self.assertEqual(br['continuityOre'], 0)
         self.assertEqual(br['spreadOre'], 0)
-        self.assertEqual(r['schedule']['objective'], br['costOre'])
+        self.assertEqual(r['schedule']['lexicographic']['costOre'], br['costOre'])
 
     def test_uncovered_weight_out_of_range_is_rejected(self):
         d, _ = fixture()
@@ -66,14 +66,14 @@ class ObjectiveWeights(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_input(d)
 
-    def test_zero_uncovered_weight_leaves_need_uncovered(self):
+    def test_zero_uncovered_weight_still_covers_need(self):
         d, _ = fixture()
         d['rules']['nightFloor'] = 0
         d['objectiveWeights'] = dict(continuitySek=0, spreadSekPerPermille=0, uncoveredSekPerMinute=0)
         r = solve(d, 5)
         self.assertIn(r['schedule']['solverStatus'], ['OPTIMAL', 'FEASIBLE'])
-        self.assertEqual(r['schedule']['assignments'], [])
-        self.assertGreater(sum(u['count'] for u in r['schedule']['uncovered']), 0)
+        self.assertGreater(len(r['schedule']['assignments']), 0)
+        self.assertEqual(r['schedule']['lexicographic']['uncoveredMinutes'], 0)
 
     def test_tenfold_continuity_reduces_relations_on_galaxen_week(self):
         path = os.path.join(os.path.dirname(__file__), 'galaxen_7d.json')

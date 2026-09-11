@@ -1,8 +1,8 @@
 """CP-SAT solver. Hard rules are constraints, never penalty terms.
 
-Optimality is relative to supplied shift templates and the configured start grid.
-The objective is integer cents for paid time + 50 SEK per customer/employee
-relationship + 2.50 SEK per permille of workload-utilisation spread.
+Lexikografisk optimering: (1) minimera obemannat kundbehov,
+(2) minimera personalkostnad, (3) minimera kontinuitet/spridning.
+Hårda regler lättas aldrig. Täckning får inte sänkas för att spara kostnad.
 """
 from math import floor
 from uuid import uuid4
@@ -197,11 +197,14 @@ def solve(data, seconds=30):
     ow=data.get('objectiveWeights') or {}
     continuity_ore=int(round(float(ow.get('continuitySek',50))*100))
     spread_ore=int(round(float(ow.get('spreadSekPerPermille',2.5))*100))
-    # Default 500 kr per obemannad insatsminut (samma styrka som tidigare 50 000 öre).
-    # Täckning går före kostnad, kontinuitet och jämn belastning. Hårda villkor lättas aldrig.
-    uncovered_ore=int(round(float(ow.get('uncoveredSekPerMinute',500))*100))
     uncovered_minutes=sum(o['task']['minutes']*gap for o,gap in gaps)
-    model.minimize(cost+continuity_ore*sum(links)+spread_ore*spread+uncovered_ore*uncovered_minutes)
+    max_unc=max(1,sum(o['task']['minutes']*o['count'] for o,_ in gaps))
+    unc_var=model.new_int_var(0,max_unc,'uncovered_minutes')
+    model.add(unc_var==uncovered_minutes)
+    cost_var=model.new_int_var(0,10**12,'cost_ore')
+    model.add(cost_var==cost)
+    qual_var=model.new_int_var(0,10**12,'quality_ore')
+    model.add(qual_var==continuity_ore*sum(links)+spread_ore*spread)
     for c in candidates:
         model.add_hint(c['x'],0)
     for x in support_hints:
@@ -212,29 +215,83 @@ def solve(data, seconds=30):
         model.add_hint(end,first+o['task']['minutes'])
     for o,gap in gaps:
         model.add_hint(gap,o['count'])
+    t_cov=max(1.0,seconds*0.45)
+    t_cost=max(1.0,seconds*0.35)
+    t_qual=max(1.0,max(seconds,t_cov+t_cost+1)-t_cov-t_cost)
     solver=cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds=seconds
     solver.parameters.num_search_workers=8
     solver.parameters.random_seed=41
-    status=solver.solve(model)
-    code=solver.status_name(status)
+    phases=[]
+    last=None
+
+    def snapshot(sv,code,phase):
+        cost_val=int(sv.value(cost_var))
+        cont_val=continuity_ore*sum(sv.value(x) for x in links)
+        spread_val=spread_ore*(sv.value(spread) if utilisations else 0)
+        return dict(
+            code=code,
+            phase=phase,
+            seconds=sv.wall_time,
+            objective=sv.objective_value,
+            bound=sv.best_objective_bound,
+            shifts=[c['shift'] for c in candidates if sv.value(c['x'])],
+            assignments=[dict(occurrenceId=o['id'],employeeId=e,start=sv.value(start)+lo,end=sv.value(end)+lo) for o,start,end,assigns in task_vars for e,x in assigns if sv.value(x)],
+            uncovered=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=sv.value(gap)) for o,gap in gaps if sv.value(gap)],
+            uncoveredMinutes=int(sv.value(unc_var)),
+            costOre=cost_val,
+            continuityOre=int(cont_val),
+            spreadOre=int(spread_val),
+            qualityOre=int(sv.value(qual_var)),
+            proven=code=='OPTIMAL',
+        )
+
+    def run_phase(name,objective,limit,lock=None):
+        nonlocal last
+        if lock is not None:
+            lock()
+        model.minimize(objective)
+        solver.parameters.max_time_in_seconds=limit
+        st=solver.solve(model)
+        code=solver.status_name(st)
+        phases.append(dict(name=name,status=code,seconds=solver.wall_time))
+        if st in (cp_model.OPTIMAL,cp_model.FEASIBLE):
+            last=snapshot(solver,code,name)
+            return last
+        return None
+
+    run_phase('coverage',unc_var,t_cov)
+    if last:
+        best_unc=last['uncoveredMinutes']
+        run_phase('cost',cost_var,t_cost,lambda: model.add(unc_var<=best_unc))
+    if last:
+        best_cost=last['costOre']
+        run_phase('quality',qual_var,t_qual,lambda: model.add(cost_var<=best_cost))
+    code=(last or {}).get('code') or solver.status_name(cp_model.UNKNOWN)
+    if last and all(p['status']=='OPTIMAL' for p in phases):
+        code='OPTIMAL'
+    elif last:
+        code='FEASIBLE'
     explanations={
-        'OPTIMAL':'Bevisat optimal inom valda passmallar, tidssteg och viktade mål. Granska förslaget innan du godkänner.',
-        'FEASIBLE':'En giltig lösning hittades. Bästa möjliga lösning är inte bevisad inom tidsgränsen.',
+        'OPTIMAL':'Bevisat lexikografiskt optimal: maximal kundtäckning, därefter lägsta kostnad, därefter kvalitet, inom valda passmallar och tidssteg. Granska förslaget innan du godkänner.',
+        'FEASIBLE':'En giltig lösning hittades med lexikografisk prioritering (täckning före kostnad före kvalitet). Bästa möjliga lösning är inte bevisad inom tidsgränsen.',
         'INFEASIBLE':'Ingen lösning uppfyller alla hårda villkor inom valda passmallar och tidssteg. Kontrollera behov, kompetens, tillgänglighet och passmallar. Inga regler har lättats.',
         'UNKNOWN':'Sökningen avbröts vid tidsgränsen utan en hittad lösning. Detta bevisar inte att problemet är olösbart.',
         'MODEL_INVALID':'Optimeringsmodellen är ogiltig. Inget schemaförslag kan användas.'}
-    schedule=dict(id=str(uuid4()),status='draft',basedOnRevision=data['inputRevision'],shifts=[],assignments=[],uncovered=[],solverStatus=code,explanation=explanations.get(code,'Okänd beräkningsstatus.'),seconds=solver.wall_time,objective=None,bound=None)
-    if status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
-        schedule['shifts']=[c['shift'] for c in candidates if solver.value(c['x'])]
-        schedule['assignments']=[dict(occurrenceId=o['id'],employeeId=e,start=solver.value(start)+lo,end=solver.value(end)+lo) for o,start,end,assigns in task_vars for e,x in assigns if solver.value(x)]
-        schedule['uncovered']=[dict(occurrenceId=o['id'],name=o['task']['name'],date=o['date'],minutes=o['task']['minutes'],count=solver.value(gap)) for o,gap in gaps if solver.value(gap)]
-        schedule['objective']=solver.objective_value
-        schedule['bound']=solver.best_objective_bound
-        cost_val=int(round(sum(round(min_period(c)/60*wages[c['shift']['employeeId']]*100)*solver.value(c['x']) for c in candidates)))
-        cont_val=continuity_ore*sum(solver.value(x) for x in links)
-        spread_val=spread_ore*(solver.value(spread) if utilisations else 0)
-        schedule['objectiveBreakdown']=dict(costOre=cost_val,continuityOre=int(cont_val),spreadOre=int(spread_val))
+    schedule=dict(id=str(uuid4()),status='draft',basedOnRevision=data['inputRevision'],shifts=[],assignments=[],uncovered=[],solverStatus=code,explanation=explanations.get(code,'Okänd beräkningsstatus.'),seconds=sum(p['seconds'] for p in phases) if phases else solver.wall_time,objective=None,bound=None)
+    if last:
+        schedule['shifts']=last['shifts']
+        schedule['assignments']=last['assignments']
+        schedule['uncovered']=last['uncovered']
+        schedule['objective']=last['objective']
+        schedule['bound']=last['bound']
+        schedule['objectiveBreakdown']=dict(costOre=last['costOre'],continuityOre=last['continuityOre'],spreadOre=last['spreadOre'],uncoveredMinutes=last['uncoveredMinutes'])
+        schedule['lexicographic']=dict(
+            uncoveredMinutes=last['uncoveredMinutes'],
+            costOre=last['costOre'],
+            qualityOre=last['qualityOre'],
+            coverageProven=any(p['name']=='coverage' and p['status']=='OPTIMAL' for p in phases),
+            phases=phases,
+        )
         result=validate(data,schedule)
         if not result['valid']:
             schedule.update(solverStatus='MODEL_INVALID',shifts=[],assignments=[],explanation='Förslaget stoppades av den fristående kontrollen: '+result['errors'][0]['message'])
