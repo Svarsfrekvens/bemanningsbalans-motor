@@ -1,7 +1,13 @@
 # BB – överlämning till motor/Codex/Cursor: fri förläggning av vikariepass
 
 **Besluts-ID:** `BB-VIKARIEPASS-FRI-FORLAGGNING-20261102-v1`  
-**Styrande källa:** [Bemanningsbibeln v16.18, 2 november 2026](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BEMANNINGSBIBELN.md), avsnitt 8c och 8d, acceptansfallen A34–A36, källnot K17.
+**Styrande källa:** [Bemanningsbibeln v16.19, 2 november 2026](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BEMANNINGSBIBELN.md), avsnitt 8c och 8d, acceptansfallen A34–A36, källnot K17.
+
+## Aktuell samordning
+
+Den ursprungliga vikariepassregeln från v16.18 gäller oförändrat. V16.19 tillför exakt tid och gemensamma tidsbegrepp i avsnitt 20 samt A37–A42. [Gemensam arbetsorder till C och L](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BB_NASTA_LEVERANS_20261102.md) och [huvudärende 22](https://github.com/Svarsfrekvens/balansera-bemanning/issues/22) samlar leveransen. [Motorärende 1](https://github.com/Svarsfrekvens/bemanningsbalans-motor/issues/1) länkar till faktisk motorgren; skapa inte en andra implementation här.
+
+Fortsätt senaste lokala arbete inom redan givet uppdrag. Gör inte om rättade begränsningar och starta inte en ny sökomgång på grund av denna dokumentuppdatering. Samordna exportformat, tidsenheter, saknade värden, versionshantering och syntetiska kontraktsprov med L. Verkliga schemafiler, personuppgifter och lokala beslut stannar i skyddade underlag.
 
 ## Regel
 
@@ -19,6 +25,6 @@ Först prövas om kundernas behov kan täckas med tillgänglig ordinarie persona
 4. Kör **syntetiska tester A34–A36** och regressionstester för Flora, Galaxen och Vintergatan samt fristående validator. Kontrollera att nya pass kan ligga på andra dagar/klockslag än originalet, att varje pass är giltigt och att frånvaro/okänd tillgänglighet inte blir fri kapacitet.
 5. Redovisa före/efter antal vikariepass och timmar, ordinarie tid, total aktiv tid, behovstäckning och samtliga tillämpliga kontroller. Skilj **regel dokumenterad**, **regel implementerad**, **test PASS** och **verifierad verklig körning**.
 
-**Skydd:** Ändra inte Floras frysta testprofil, befintliga sparade scheman, privat rådata, drift, deployment eller gemensam solver som kan påverka aktiva tester utan separat isolerad ändring och tydlig godkännande-/regressionsprocess. Inga automatiska produktionskörningar. Befintliga operativa motorrepon/arbetsgrenar ska identifieras innan någon implementation.
+**Skydd:** Bevara originaldata, sparade baser och aktiv drift. Redan auktoriserat isolerat testarbete fortsätter inom sitt mandat; denna dokumentuppdatering startar ingen solver eller driftinstallation. Befintliga operativa motorrepon/arbetsgrenar ska identifieras innan implementation så att aktiva tester inte påverkas av en parallell ändring.
 
 **Obs:** Den gamla formuleringen i `README.md` om att välja pass från godkända passmallar är ett äldre implementationspåstående och får **inte** begränsa det nya generella verksamhetsbeslutet.
