@@ -1,0 +1,24 @@
+# BB – överlämning till motor/Codex/Cursor: fri förläggning av vikariepass
+
+**Besluts-ID:** `BB-VIKARIEPASS-FRI-FORLAGGNING-20261102-v1`  
+**Styrande källa:** [Bemanningsbibeln v16.18, 2 november 2026](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BEMANNINGSBIBELN.md), avsnitt 8c och 8d, acceptansfallen A34–A36, källnot K17.
+
+## Regel
+
+När BB skapar ett **nytt grundschema** får vikariepass läggas **var som helst i vald planeringsperiod där ett styrkt kund- eller bemanningsbehov finns**. Historiska vikariepass, deras tidigare dagar, start- och sluttider, längder, tilldelade personer och tidigare passmallar är **inte hårda sökbegränsningar**. Historiken är jämförelseunderlag.
+
+Motorn ska kunna flytta, förkorta, förlänga, ersätta och ta bort gamla vikariepass och skapa nya. Ett gammalt pass får delas i flera separata pass **endast om varje nytt sammanhängande pass** och alla andra villkor är tillåtna. Minst 4 timmar per helt arbetstillfälle gäller också vikarier. Känd frånvaro, verklig tillgänglighet, kompetens, dygnsvila, veckovila, fridagar, natt-/jourbegränsningar, periodgränser och verksamhetsspecifika regler gäller utan undantag. Saknad tillgänglighet får inte antas vara styrkt.
+
+Först prövas om kundernas behov kan täckas med tillgänglig ordinarie personal enligt SSG och andra hårda villkor. Därefter får vikarier placeras enligt det kvarstående behovet. Minskad vikarietid får aldrig försämra behovstäckning eller bryta hårda regler, och får inte felaktigt beskrivas som samma sak som minskad total tid eller realiserad besparing.
+
+## För Codex/Cursor – verifiera faktisk motorbindning
+
+1. Identifiera vilken kodgren, tjänst och profil som **faktiskt används** av körningen. Detta repository kan vara en äldre motorimplementation. Anta **inte** att det är den aktuella produktionsmotorn bara för att README beskriver en solver.
+2. Undersök exakt om schemakandidater hämtas uteslutande från `godkända passmallar`, ursprungspass eller historiska personkopplingar. En sådan begränsning är en **möjlig motsägelse** mot beslutet. Redovisa koden och de testfall som bevisar eller motbevisar det.
+3. Planera minsta verksamhetssäkra korrigering så att nya pass kan genereras över hela den aktuella perioden enligt behov och hårda villkor. Håll ordinarie och vikarier, historiskt schema och nytt schema åtskilda.
+4. Kör **syntetiska tester A34–A36** och regressionstester för Flora, Galaxen och Vintergatan samt fristående validator. Kontrollera att nya pass kan ligga på andra dagar/klockslag än originalet, att varje pass är giltigt och att frånvaro/okänd tillgänglighet inte blir fri kapacitet.
+5. Redovisa före/efter antal vikariepass och timmar, ordinarie tid, total aktiv tid, behovstäckning och samtliga tillämpliga kontroller. Skilj **regel dokumenterad**, **regel implementerad**, **test PASS** och **verifierad verklig körning**.
+
+**Skydd:** Ändra inte Floras frysta testprofil, befintliga sparade scheman, privat rådata, drift, deployment eller gemensam solver som kan påverka aktiva tester utan separat isolerad ändring och tydlig godkännande-/regressionsprocess. Inga automatiska produktionskörningar. Befintliga operativa motorrepon/arbetsgrenar ska identifieras innan någon implementation.
+
+**Obs:** Den gamla formuleringen i `README.md` om att välja pass från godkända passmallar är ett äldre implementationspåstående och får **inte** begränsa det nya generella verksamhetsbeslutet.
