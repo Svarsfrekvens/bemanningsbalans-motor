@@ -1,13 +1,17 @@
 # BB – överlämning till motor/Codex/Cursor: fri förläggning av vikariepass
 
 **Besluts-ID:** `BB-VIKARIEPASS-FRI-FORLAGGNING-20261102-v1`  
-**Styrande källa:** [Bemanningsbibeln v16.19, 2 november 2026](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BEMANNINGSBIBELN.md), avsnitt 8c och 8d, acceptansfallen A34–A36, källnot K17.
+**Styrande källa:** [Bemanningsbibeln v16.20, 2 november 2026](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BEMANNINGSBIBELN.md), avsnitt 8c och 8d, acceptansfallen A34–A36, källnot K17.
 
 ## Aktuell samordning
 
 Den ursprungliga vikariepassregeln från v16.18 gäller oförändrat. V16.19 tillför exakt tid och gemensamma tidsbegrepp i avsnitt 20 samt A37–A42. [Gemensam arbetsorder till C och L](https://github.com/Svarsfrekvens/balansera-bemanning/blob/main/docs/BB_NASTA_LEVERANS_20261102.md) och [huvudärende 22](https://github.com/Svarsfrekvens/balansera-bemanning/issues/22) samlar leveransen. [Motorärende 1](https://github.com/Svarsfrekvens/bemanningsbalans-motor/issues/1) länkar till faktisk motorgren; skapa inte en andra implementation här.
 
-Fortsätt senaste lokala arbete inom redan givet uppdrag. Gör inte om rättade begränsningar och starta inte en ny sökomgång på grund av denna dokumentuppdatering. Samordna exportformat, tidsenheter, saknade värden, versionshantering och syntetiska kontraktsprov med L. Verkliga schemafiler, personuppgifter och lokala beslut stannar i skyddade underlag.
+Fortsätt senaste lokala arbete enligt användarens senaste uttryckliga uppdrag om fördjupad analys. Återanvänd rättade begränsningar och bevara bästa kandidat som reserv. Den tidigare arbetsorderns begränsning till en avslutande sökomgång hindrar inte det senare uppdraget; följ den gemensamma arbetsorderns uppdaterade C-avsnitt. Samordna exportformat, tidsenheter, saknade värden, versionshantering och syntetiska kontraktsprov med L. Verkliga schemafiler, personuppgifter och lokala beslut stannar i skyddade underlag.
+
+## Medicinering: precisering i v16.20
+
+Bibelns avsnitt 2 och K19 styr `BB-MEDICINERING-INTERVALL-20261102-v1`. Medicinering med angivet utförandeintervall får planeras inom intervallet med hela varaktigheten bevarad. Uttryckliga fasta tider och individuella ordinationsvillkor gäller fortsatt. Ingen påtvingad start vid första intervallgränsen, inga konstruerade intervall och ingen generell fem-/tiominutersförkortning. Kontrollera samma regel i faktisk motor, oberoende validator och överföring till appen enligt A43–A46. Dokumentkrav och genomförda prov redovisas separat.
 
 ## Regel
 
